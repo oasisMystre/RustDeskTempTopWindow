@@ -11,11 +11,12 @@ InputBlocker::InputBlocker()
     : m_isBlocking(false)
     , m_cursorHidden(false)
     , m_originalCursorCount(0)
-    , m_allowEscapeKey(true)
+    , m_allowEscapeKey(false)
     , m_allowCtrlAltDel(true)
     , m_allowWinKey(false)
     , m_blockMouse(true)
     , m_blockKeyboard(true)
+    , m_ignoreVirtualInput(true)
     , m_mouseHook(nullptr)
     , m_keyboardHook(nullptr)
     , m_escapeKeyPressTime(0)
@@ -250,7 +251,18 @@ LRESULT InputBlocker::HandleKeyboardHook(int nCode, WPARAM wParam, LPARAM lParam
 
 bool InputBlocker::ShouldBlockMouse(WPARAM wParam, LPARAM lParam)
 {
-    // Block all mouse events when mouse blocking is enabled
+    // Check if this is virtual/injected input and we should ignore it
+    if (m_ignoreVirtualInput)
+    {
+        MSLLHOOKSTRUCT* pMouse = (MSLLHOOKSTRUCT*)lParam;
+        if (pMouse && (pMouse->flags & LLMHF_INJECTED))
+        {
+            // Don't block virtual/injected input - allow it to pass through
+            return false;
+        }
+    }
+    
+    // Block physical mouse events when mouse blocking is enabled
     switch (wParam)
     {
         case WM_LBUTTONDOWN:
@@ -274,6 +286,16 @@ bool InputBlocker::ShouldBlockKeyboard(WPARAM wParam, LPARAM lParam)
 {
     KBDLLHOOKSTRUCT* pKeyboard = (KBDLLHOOKSTRUCT*)lParam;
     DWORD vkCode = pKeyboard->vkCode;
+    
+    // Check if this is virtual/injected input and we should ignore it
+    if (m_ignoreVirtualInput)
+    {
+        if (pKeyboard && (pKeyboard->flags & LLKHF_INJECTED))
+        {
+            // Don't block virtual/injected input - allow it to pass through
+            return false;
+        }
+    }
     
     // Always allow Ctrl+Alt+Del if enabled
     if (m_allowCtrlAltDel)

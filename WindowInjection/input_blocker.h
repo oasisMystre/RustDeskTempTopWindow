@@ -37,6 +37,7 @@ public:
     void SetAllowWinKey(bool allow) { m_allowWinKey = allow; }
     void SetBlockMouse(bool block) { m_blockMouse = block; }
     void SetBlockKeyboard(bool block) { m_blockKeyboard = block; }
+    void SetIgnoreVirtualInput(bool ignore) { m_ignoreVirtualInput = ignore; }
 
     // Emergency exit callback
     void SetEmergencyExitCallback(std::function<void()> callback) { m_emergencyExitCallback = callback; }
@@ -71,6 +72,7 @@ private:
     bool m_allowWinKey;
     bool m_blockMouse;
     bool m_blockKeyboard;
+    bool m_ignoreVirtualInput;
 
     // Hooks
     HHOOK m_mouseHook;

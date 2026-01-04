@@ -2,6 +2,7 @@
 
 #include <string>
 #include <tchar.h>
+#include <cstdlib>
 
 #include "pch.h"
 #include "./bitmap_loader.h"
@@ -96,9 +97,13 @@ TCHAR g_bmpPath[256] = {
     0,
 };
 
+// Configuration flags
 bool g_loadFromMemory = true;
-bool g_enableInputBlocking = true;
-bool g_enableCursorHiding = true;
+bool g_enableInputBlocking = true;      // Enable/disable input blocking functionality
+bool g_enableCursorHiding = true;       // Enable/disable cursor hiding
+bool g_ignoreVirtualInput = true;       // Ignore virtual/software-injected input (recommended: true)
+bool g_enableEmergencyExit = false;     // Emergency exit via 5x Escape key (DISABLED by default for security)
+bool g_cleanupPerformed = false;        // Internal flag to prevent multiple cleanup calls
 
 #ifdef WINDOWINJECTION_EXPORTS
 BitmapLoader g_bitmapLoader(false);
@@ -116,6 +121,11 @@ VOID OnPaintGdi(HWND hwnd, HDC hdc);
 // https://stackoverflow.com/a/66238748/1926020
 VOID OnPaintGdiPlus(HWND hwnd, HDC hdc);
 void EmergencyExitCallback();
+void PerformCleanupAndExit();
+BOOL WINAPI ConsoleCtrlHandler(DWORD fdwCtrlType);
+void AtExitHandler();
+void SetupExitHandlers();
+
 
 BOOL IsWindowsVersionOrGreater(DWORD os_major, DWORD os_minor,
                                DWORD build_number, WORD service_pack_major,
@@ -134,10 +144,9 @@ LRESULT CALLBACK TrashParentWndProc(HWND hwnd, UINT message, WPARAM wParam,
   case WM_WINDOWPOSCHANGING:
     return 0;
   case WM_CLOSE:
-    HANDLE myself;
-    myself = OpenProcess(PROCESS_ALL_ACCESS, false, GetCurrentProcessId());
-    TerminateProcess(myself, 0);
-    return true;
+    PerformCleanupAndExit();
+    PostQuitMessage(0);
+    return 0;
 
   case WM_PAINT: {
     // paint a pretty picture
@@ -193,6 +202,125 @@ void ShowBitmapLoaderErrorMsg(const TCHAR *msg, EBitmapLoader code,
 #endif
 }
 
+void PerformCleanupAndExit() {
+  // Prevent multiple cleanup calls
+  if (g_cleanupPerformed) {
+    return;
+  }
+  g_cleanupPerformed = true;
+
+#ifdef WINDOWINJECTION_EXPORTS
+  OutputDebugStringA("PerformCleanupAndExit: Starting cleanup...\n");
+#else
+  _tprintf(_T("PerformCleanupAndExit: Starting cleanup...\n"));
+#endif
+
+  // Ensure input blocking is stopped
+  if (g_enableInputBlocking && g_inputBlocker.IsBlocking()) {
+#ifdef WINDOWINJECTION_EXPORTS
+    OutputDebugStringA("PerformCleanupAndExit: Stopping input blocking...\n");
+#else
+    _tprintf(_T("PerformCleanupAndExit: Stopping input blocking...\n"));
+#endif
+    EInputBlocker result = g_inputBlocker.StopBlocking();
+    if (result != EInputBlocker::kOk) {
+#ifdef WINDOWINJECTION_EXPORTS
+      OutputDebugStringA("PerformCleanupAndExit: Warning - Failed to stop input blocking\n");
+#else
+      _tprintf(_T("PerformCleanupAndExit: Warning - Failed to stop input blocking\n"));
+#endif
+    }
+  }
+  
+  // Ensure cursor is shown
+  if (g_enableCursorHiding && g_inputBlocker.IsCursorHidden()) {
+#ifdef WINDOWINJECTION_EXPORTS
+    OutputDebugStringA("PerformCleanupAndExit: Showing cursor...\n");
+#else
+    _tprintf(_T("PerformCleanupAndExit: Showing cursor...\n"));
+#endif
+    g_inputBlocker.ShowCursor();
+  }
+  
+  // Close window
+  if (g_hwnd) {
+#ifdef WINDOWINJECTION_EXPORTS
+    OutputDebugStringA("PerformCleanupAndExit: Destroying window...\n");
+#else
+    _tprintf(_T("PerformCleanupAndExit: Destroying window...\n"));
+#endif
+    DestroyWindow(g_hwnd);
+    g_hwnd = NULL;
+  }
+
+#ifdef WINDOWINJECTION_EXPORTS
+  OutputDebugStringA("PerformCleanupAndExit: Cleanup completed\n");
+#else
+  _tprintf(_T("PerformCleanupAndExit: Cleanup completed\n"));
+#endif
+}
+
+/*
+ * Cleanup and Exit Handling System
+ * 
+ * This system ensures that input blocking is always properly disabled and the cursor
+ * is restored when the application exits, regardless of how the exit occurs:
+ * 
+ * 1. Normal Exit: WM_CLOSE message -> PerformCleanupAndExit() -> PostQuitMessage()
+ * 2. Emergency Exit: Multiple Escape keys -> EmergencyExitCallback() -> PerformCleanupAndExit()
+ * 3. DLL Unload: DLL_PROCESS_DETACH -> PerformCleanupAndExit()
+ * 4. Console Ctrl: Ctrl+C/Break -> ConsoleCtrlHandler() -> PerformCleanupAndExit()
+ * 5. AtExit: atexit() -> AtExitHandler() -> PerformCleanupAndExit()
+ * 6. Destructor: ~InputBlocker() -> StopBlocking() + ShowCursor()
+ * 
+ * The g_cleanupPerformed flag prevents multiple cleanup attempts.
+ * This ensures users never get stuck with blocked input or hidden cursor.
+ */
+
+BOOL WINAPI ConsoleCtrlHandler(DWORD fdwCtrlType) {
+  switch (fdwCtrlType) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+#ifdef WINDOWINJECTION_EXPORTS
+      OutputDebugStringA("ConsoleCtrlHandler: Console control event received, performing cleanup...\n");
+#else
+      _tprintf(_T("ConsoleCtrlHandler: Console control event received (%lu), performing cleanup...\n"), fdwCtrlType);
+#endif
+      PerformCleanupAndExit();
+      return TRUE;
+    default:
+      return FALSE;
+  }
+}
+
+void AtExitHandler() {
+#ifdef WINDOWINJECTION_EXPORTS
+  OutputDebugStringA("AtExitHandler: Process exit detected, performing cleanup...\n");
+#else
+  _tprintf(_T("AtExitHandler: Process exit detected, performing cleanup...\n"));
+#endif
+  PerformCleanupAndExit();
+}
+
+void SetupExitHandlers() {
+  // Set up console control handler for Ctrl+C, etc.
+  SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+  
+  // Set up atexit handler for process termination
+  atexit(AtExitHandler);
+  
+#ifdef WINDOWINJECTION_EXPORTS
+  OutputDebugStringA("SetupExitHandlers: Exit handlers installed\n");
+#else
+  _tprintf(_T("SetupExitHandlers: Exit handlers installed\n"));
+#endif
+}
+
+
+
 void EmergencyExitCallback() {
   // Emergency exit triggered by multiple Escape key presses
 #ifdef WINDOWINJECTION_EXPORTS
@@ -202,9 +330,7 @@ void EmergencyExitCallback() {
   _tprintf(_T("Emergency exit triggered. Closing privacy window.\n"));
 #endif
 
-  if (g_hwnd) {
-    PostMessage(g_hwnd, WM_CLOSE, NULL, NULL);
-  }
+  PerformCleanupAndExit();
 }
 
 HWND CreateWin(HMODULE hModule, UINT zbid, const TCHAR *title,
@@ -482,12 +608,20 @@ DWORD WINAPI UwU(LPVOID lpParam) {
   }
 
   if (g_enableInputBlocking) {
-    g_inputBlocker.SetEmergencyExitCallback(EmergencyExitCallback);
-    g_inputBlocker.SetAllowEscapeKey(false);
+    // Emergency exit configuration - DISABLED by default for security
+    // To enable: set g_enableEmergencyExit = true above
+    // When enabled, pressing Escape 5 times within 3 seconds will exit
+    if (g_enableEmergencyExit) {
+      g_inputBlocker.SetEmergencyExitCallback(EmergencyExitCallback);
+      g_inputBlocker.SetAllowEscapeKey(true);
+    } else {
+      g_inputBlocker.SetAllowEscapeKey(false);  // Block Escape key completely
+    }
     g_inputBlocker.SetAllowCtrlAltDel(false);
     g_inputBlocker.SetAllowWinKey(false);
     g_inputBlocker.SetBlockMouse(true);
     g_inputBlocker.SetBlockKeyboard(true);
+    g_inputBlocker.SetIgnoreVirtualInput(g_ignoreVirtualInput);
 
     EInputBlocker blockResult = g_inputBlocker.StartBlocking();
     if (blockResult != EInputBlocker::kOk) {
@@ -502,6 +636,9 @@ DWORD WINAPI UwU(LPVOID lpParam) {
   if (g_enableCursorHiding) {
     g_inputBlocker.HideCursor();
   }
+
+  // Setup additional exit handlers for safety
+  SetupExitHandlers();
 
 #ifndef WINDOWINJECTION_EXPORTS
   ShowWindow(g_hwnd, SW_SHOW);
@@ -613,16 +750,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ulReasonForCall,
     break;
   case DLL_PROCESS_DETACH:
     // Perform any necessary cleanup.
-    if (g_hwnd) {
-      PostMessage(g_hwnd, WM_CLOSE, NULL, NULL);
-    }
-    // MediaLoader temporarily disabled
-    if (g_enableInputBlocking) {
-      g_inputBlocker.StopBlocking();
-    }
-    if (g_enableCursorHiding) {
-      g_inputBlocker.ShowCursor();
-    }
+    PerformCleanupAndExit();
     break;
   default:
     break;
