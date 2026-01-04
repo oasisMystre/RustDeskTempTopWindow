@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  target: windows-2019
+  configuration: Release
+  platform: x64
+  target_version: Windows10
+
+jobs:
+  build_publish:
+    uses: ./.github/workflows/publish.yml
+    with:
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      configuration: ${{ matrix.configuration }}
+      target_version: ${{ matrix.target_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64]
+        target: [windows-2019]
+        configuration: [Release]
+        target_version: [Windows10]
