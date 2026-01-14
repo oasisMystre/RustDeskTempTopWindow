@@ -139,17 +139,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\WindowInjection\bitmap_loader.h" />
     <ClInclude Include="..\WindowInjection\framework.h" />
-    <ClInclude Include="..\WindowInjection\input_blocker.h" />
-    <ClInclude Include="..\WindowInjection\img.h" />
     <ClInclude Include="..\WindowInjection\pch.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\WindowInjection\bitmap_loader.cpp" />
     <ClCompile Include="..\WindowInjection\dllmain.cpp" />
-    <ClCompile Include="..\WindowInjection\input_blocker.cpp" />
-    <ClCompile Include="..\WindowInjection\img.cpp" />
     <ClCompile Include="..\WindowInjection\pch.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -159,17 +159,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="bitmap_loader.h" />
     <ClInclude Include="framework.h" />
-    <ClInclude Include="img.h" />
-    <ClInclude Include="input_blocker.h" />
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="bitmap_loader.cpp" />
     <ClCompile Include="dllmain.cpp" />
-    <ClCompile Include="img.cpp" />
-    <ClCompile Include="input_blocker.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
