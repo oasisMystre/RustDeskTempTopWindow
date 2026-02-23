@@ -1,9 +1,10 @@
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
-// Windows Header file
+#define OEMRESOURCE
+// Windows Header files
 #include <windows.h>
-#include <objidl.h> 
+#include <objidl.h>
 #include <gdiplus.h>
 
 // C++ Standard Library Headers
@@ -13,3 +14,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <map>      // <--- THIS WAS MISSING
+#include <vector>   // <--- Good to have
+#include <memory>
